@@ -1,0 +1,6 @@
+[controller]
+10.8.187.239  ansible_become=y ansible_connection=ssh ansible_user=cloud-user
+
+[tester]
+10.8.187.24 ansible_become=y ansible_connection=ssh ansible_user=cloud-user
+
