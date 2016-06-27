@@ -1,0 +1,94 @@
+---
+- name: Manila with Cephfs backend
+  hosts: [controller]
+  become: True
+  tasks:
+  - name: setup rhscon.repo 
+    template: src=./cephtemplates/rhscon.repo.j2 dest=/etc/yum.repos.d/rhscon.repo
+  - name: setup cephmon.repo
+    template: src=./cephtemplates/cephmon.repo.j2 dest=/etc/yum.repos.d/cephmon.repo
+  - name: setup cephosd.repo
+    template: src=./cephtemplates/cephosd.repo.j2 dest=/etc/yum.repos.d/cephosd.repo
+  - name: setup cephtools.repo
+    template: src=./cephtemplates/cephtools.repo.j2 dest=/etc/yum.repos.d/cephtools.repo
+
+  - name: Register as user (subscr_user) with password (subscr_passwd) and auto-subscribe to available content.
+    redhat_subscription: state=present username="{{ subscr_user}}" password="{{ subscr_password }}" autosubscribe=true
+
+  - name: Install ceph-ansible
+    yum: name=ceph-ansible state=present
+
+  - name: creat stack user
+    user: name=stack shell=/bin/bash
+  - name: Create ceph-ansible-keys direcotry 
+    become_user: stack
+    file: path=~/ceph-ansible-keys state=directory
+
+  - name: Copy site.yml.sample to site.yml 
+    command: cp /usr/share/ceph-ansible/site.yml.sample /usr/share/ceph-ansible/site.yml
+  - name: Copy hosts file
+    template: src=./cephtemplates/hosts.j2 dest=/etc/ansible/hosts
+  - name: Copy all file 
+    template: src=./cephtemplates/all.j2 dest=/usr/share/ceph-ansible/group_vars/all
+  - name: Copy osds file
+    template: src=./cephtemplates/osds.j2 dest=/usr/share/ceph-ansible/group_vars/osds
+  - name: ignore the SSH authenticity checking made by Ansible
+    lineinfile: dest=/usr/share/ceph-ansible/ansible.cfg line="host_key_checking = False"  insertafter=EOF state=present
+
+  - name: Set up ssh
+    shell: cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+
+
+#  - name: Get host IP to update ceph-ansible config files
+#    shell: /sbin/ifconfig eth0 | grep 'inet ' | awk '{ print $2}'
+#    register: host_ip
+#  -  shell: cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+   
+
+  - name: Replace rhel-7-server-rhceph-1.3-mon-rpms repo usage by dummy ls task
+    vars:
+    - command_line: "  shell: ls"
+    lineinfile: dest=/usr/share/ceph-ansible/roles/ceph-common/tasks/pre_requisites/prerequisite_rh_storage_cdn_install.yml regexp="rhel-7-server-rhceph-1.3-mon-rpms" line="{{ command_line }}"
+
+  - name: Replace rhel-7-server-rhceph-1.3-osd-rpms repo usage by dummy ls task
+    vars:
+    - command_line: "  shell: ls"
+    lineinfile: dest=/usr/share/ceph-ansible/roles/ceph-common/tasks/pre_requisites/prerequisite_rh_storage_cdn_install.yml regexp="rhel-7-server-rhceph-1.3-osd-rpms" line="{{ command_line }}"
+
+  - name: playCeph
+    shell: cd /usr/share/ceph-ansible; ansible-playbook site.yml
+    register: ceph_ansible_output
+
+  - name: ceph version
+    shell: ceph -v | awk '{print $3; }'
+    register: ceph_version
+
+  - debug: msg="{{ ceph_version.stdout }}"
+
+  - name: Fail if wrong version of ceph was installed
+    fail: msg="Wrong ceph version"
+    when: ceph_version.stdout != "10.2.1-13.el7cp"
+
+  - name: Workaround. Fix ceph cluster health by reducing the number of replicas in each pool 
+    shell:  ceph osd pool set rbd size 1; ceph osd pool set cephfs_data size 1; ceph osd pool set cephfs_metadata size 1
+
+  - name: record ceph cluster health status
+    shell:  ceph -s | grep health | awk '{print $2; }'
+    register: ceph_health_status
+
+  - name: Fail if ceph cluster is not healthy
+    fail: msg="Ceph cluster is not healthy"
+    when: ceph_health_status.stdout != "HEALTH_OK"
+
+
+  - name:  Verify that manila services are running and that openstack looks sane
+    shell: source /root/keystonerc_admin; manila service-list; openstack-status
+    register: openstack_status
+
+  - debug: msg="{{ openstack_status.stdout }}"
+
+  - name: Setup Ceph for manila
+    vars:
+      - MON_CAPS: 'allow r, allow command "auth del", allow command "auth caps", allow command "auth get", allow command "auth get-or-create"'
+    shell: ceph auth get-or-create client.manila -o manila.keyring mds 'allow *'  osd 'allow rw'  mon "{{ MON_CAPS }}"
+
